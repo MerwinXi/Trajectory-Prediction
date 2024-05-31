@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 import logging
 import pickle as pkl
 
-# 数据集注册
+
 class Registry:
     def __init__(self):
         self._modules = {}
@@ -19,7 +19,7 @@ class Registry:
 
 DATASETS = Registry()
 
-# 处理类
+
 class Process:
     def __init__(self, processes, cfg):
         self.processes = processes
@@ -30,7 +30,7 @@ class Process:
             sample = process(sample, self.cfg)
         return sample
 
-# 基础数据集类
+
 class BaseDataset(Dataset):
     def __init__(self, data_root, split, processes=None, cfg=None):
         self.cfg = cfg
@@ -104,7 +104,7 @@ class ArgoverseDataset(BaseDataset):
         info['distance_error'] = np.load(osp.join(self.data_root, parts[5]))
         return info
 
-# 用于测试的数据集定义
+
 def test_dataset():
     data_root = '/path/to/argoverse/data'
     split = 'train'
