@@ -1,58 +1,48 @@
 import torch
-import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from datasets import ArgoverseDataset
+from encoders import MultiModalRepresentation
+from formers import PreFusionDModel, PETModel
+from losses import TotalLoss
+from trainer import Trainer
 
-class TrackFormer(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=6):
-        super(TrackFormer, self).__init__()
-        self.encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
-            num_layers=num_layers
-        )
-        self.decoder = nn.TransformerDecoder(
-            nn.TransformerDecoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
-            num_layers=num_layers
-        )
-        self.fc = nn.Linear(input_dim, output_dim)
-        self.attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=8)
+def main():
+    # 配置参数
+    data_root = '/path/to/argoverse/data'
+    train_split = 'train'
+    val_split = 'val'
+    cfg = {
+        'some_config_key': 'some_config_value'
+    }
 
-    def forward(self, src, tgt):
-        memory = self.encoder(src)
-        attention_output, _ = self.attention(memory, memory, memory)
-        output = self.decoder(tgt, attention_output)
-        return self.fc(output)
+    # 初始化数据集
+    train_dataset = ArgoverseDataset(data_root, train_split, processes=[], cfg=cfg)
+    val_dataset = ArgoverseDataset(data_root, val_split, processes=[], cfg=cfg)
 
-class PMFormer(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=6):
-        super(PMFormer, self).__init__()
-        self.map_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
-            num_layers=num_layers
-        )
-        self.planning_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
-            num_layers=num_layers
-        )
-        self.cross_attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=8)
-        self.fc = nn.Linear(input_dim, output_dim)
+    # 数据加载器
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
-    def forward(self, map_features, planning_features):
-        map_memory = self.map_encoder(map_features)
-        planning_memory = self.planning_encoder(planning_features)
-        cross_attention_output, _ = self.cross_attention(planning_memory, map_memory, map_memory)
-        return self.fc(cross_attention_output)
+    # 初始化模型
+    # PreFusion-D模型
+    prefusion_model = PreFusionDModel(track_input_dim=128, track_hidden_dim=256, track_output_dim=128,
+                                      map_input_dim=128, map_hidden_dim=256, map_output_dim=128,
+                                      planning_input_dim=128, planning_hidden_dim=256, planning_output_dim=128)
+    
+    # PET模型
+    pet_model = PETModel(track_input_dim=128, track_hidden_dim=256, track_output_dim=128,
+                         pm_input_dim=128, pm_hidden_dim=256, pm_output_dim=128)
 
-class PETModel(nn.Module):
-    def __init__(self, track_input_dim, track_hidden_dim, track_output_dim,
-                 pm_input_dim, pm_hidden_dim, pm_output_dim):
-        super(PETModel, self).__init__()
-        self.trackformer = TrackFormer(track_input_dim, track_hidden_dim, track_output_dim)
-        self.pmformer = PMFormer(pm_input_dim, pm_hidden_dim, pm_output_dim)
-        self.prediction_header = nn.Linear(track_output_dim, pm_output_dim)
-        self.uncertainty_module = nn.Linear(pm_output_dim, 2)  # GMM的μ和σ
+    # 优化器和调度器
+    optimizer = optim.AdamW(pet_model.parameters(), lr=0.001, weight_decay=0.0001)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
-    def forward(self, history, future, map_features, planning_features):
-        track_output = self.trackformer(history, future)
-        pm_output = self.pmformer(map_features, planning_features)
-        final_output = self.prediction_header(pm_output)
-        mu, sigma = self.uncertainty_module(final_output).chunk(2, dim=-1)
-        return final_output, mu, sigma
+    # 初始化Trainer
+    trainer = Trainer(pet_model, train_loader, val_loader, optimizer, scheduler, num_epochs=10)
+
+    # 训练
+    trainer.train()
+
+if __name__ == '__main__':
+    main()
