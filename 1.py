@@ -1,43 +1,103 @@
+import os
+import os.path as osp
+import numpy as np
 import torch
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from datasets import ArgoverseDataset
-from encoders import MultiModalRepresentation
-from formers import PETModel
-from losses import TotalLoss
-from trainer import Trainer
+from torch.utils.data import Dataset
+import logging
+import pickle as pkl
 
-def main():
-    # 配置参数
-    data_root = '/path/to/argoverse/data'
-    train_split = 'train'
-    val_split = 'val'
-    cfg = {
-        'some_config_key': 'some_config_value'
-    }
+class Registry:
+    def __init__(self):
+        self._modules = {}
 
-    # 初始化数据集
-    train_dataset = ArgoverseDataset(data_root, train_split, processes=[], cfg=cfg)
-    val_dataset = ArgoverseDataset(data_root, val_split, processes=[], cfg=cfg)
+    def register_module(self, module):
+        def decorator(cls):
+            self._modules[module] = cls
+            return cls
+        return decorator
 
-    # 数据加载器
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+DATASETS = Registry()
 
-    # 初始化模型
-    model = PETModel(track_input_dim=128, track_hidden_dim=256, track_output_dim=128,
-                     pm_input_dim=128, pm_hidden_dim=256, pm_output_dim=128)
+class Process:
+    def __init__(self, processes, cfg):
+        self.processes = processes
+        self.cfg = cfg
 
-    # 优化器和调度器
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.0001)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    def __call__(self, sample):
+        for process in self.processes:
+            sample = process(sample, self.cfg)
+        return sample
 
-    # 初始化Trainer
-    trainer = Trainer(model, train_loader, val_loader, optimizer, scheduler, num_epochs=10)
+class BaseDataset(Dataset):
+    def __init__(self, data_root, split, processes=None, cfg=None):
+        self.cfg = cfg
+        self.logger = logging.getLogger(__name__)
+        self.data_root = data_root
+        self.training = 'train' in split
+        self.processes = Process(processes, cfg)
+        self.load_annotations()
 
-    # 训练
-    trainer.train()
+    def load_annotations(self):
+        raise NotImplementedError
 
-if __name__ == '__main__':
-    main()
+    def __len__(self):
+        return len(self.data_infos)
+
+    def __getitem__(self, idx):
+        data_info = self.data_infos[idx]
+        history = np.array(data_info['history'], dtype=np.float32)
+        future = np.array(data_info['future'], dtype=np.float32)
+        planning_features = np.array(data_info['planning_features'], dtype=np.float32)
+        target = np.array(data_info['target'], dtype=np.float32)
+        in_drivable_area = np.array(data_info['in_drivable_area'], dtype=np.bool_)
+        distance_error = np.array(data_info['distance_error'], dtype=np.float32)
+
+        sample = {
+            'history': history,
+            'future': future,
+            'planning_features': planning_features,
+            'target': target,
+            'in_drivable_area': in_drivable_area,
+            'distance_error': distance_error
+        }
+
+        if self.training:
+            sample = self.processes(sample)
+
+        return sample
+
+@DATASETS.register_module(module='ArgoverseDataset')
+class ArgoverseDataset(BaseDataset):
+    def __init__(self, data_root, split, processes=None, cfg=None):
+        self.list_path = osp.join(data_root, f'{split}_list.txt')
+        self.split = split
+        super().__init__(data_root, split, processes=processes, cfg=cfg)
+
+    def load_annotations(self):
+        self.logger.info('Loading Argoverse annotations...')
+        cache_path = f'cache/argoverse_{self.split}.pkl'
+        os.makedirs('cache', exist_ok=True)
+        if osp.exists(cache_path):
+            with open(cache_path, 'rb') as cache_file:
+                self.data_infos = pkl.load(cache_file)
+            return
+
+        self.data_infos = []
+        with open(self.list_path) as list_file:
+            for line in list_file:
+                self.data_infos.append(self.load_annotation(line.strip()))
+
+        with open(cache_path, 'wb') as cache_file:
+            pkl.dump(self.data_infos, cache_file)
+
+    def load_annotation(self, line):
+        info = {}
+        parts = line.split()
+        info['history'] = np.load(osp.join(self.data_root, parts[0]))
+        info['future'] = np.load(osp.join(self.data_root, parts[1]))
+        info['planning_features'] = np.load(osp.join(self.data_root, parts[2]))
+        info['target'] = np.load(osp.join(self.data_root, parts[3]))
+        info['in_drivable_area'] = np.load(osp.join(self.data_root, parts[4]))
+        info['distance_error'] = np.load(osp.join(self.data_root, parts[5]))
+        return info
 
