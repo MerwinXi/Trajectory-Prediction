@@ -1,55 +1,35 @@
-import torch
-import torch.nn as nn
+import numpy as np
 
-class DAALoss(nn.Module):
-    def __init__(self):
-        super(DAALoss, self).__init__()
-        self.huber_loss = nn.SmoothL1Loss()
+def min_ade(predictions, ground_truth):
+    ade = np.linalg.norm(predictions - ground_truth, axis=-1).mean(axis=-1)
+    min_ade = np.min(ade)
+    return min_ade
 
-    def forward(self, pred, target, in_drivable_area, distance_error):
-        huber_loss = self.huber_loss(pred, target)
-        penalty = torch.log1p(distance_error)
-        loss = torch.where(in_drivable_area, huber_loss, huber_loss * penalty)
-        return loss.mean()
+def min_fde(predictions, ground_truth):
+    fde = np.linalg.norm(predictions[:, -1] - ground_truth[:, -1], axis=-1)
+    min_fde = np.min(fde)
+    return min_fde
 
-class ConfidenceLoss(nn.Module):
-    def __init__(self):
-        super(ConfidenceLoss, self).__init__()
-        self.kl_div = nn.KLDivLoss(reduction='batchmean')
+def miss_rate(predictions, ground_truth, threshold=2.0):
+    distances = np.linalg.norm(predictions - ground_truth, axis=-1)
+    min_distances = np.min(distances, axis=-1)
+    miss_rate = np.mean(min_distances > threshold)
+    return miss_rate
 
-    def forward(self, pred_dist, target_dist):
-        return self.kl_div(pred_dist.log(), target_dist)
+def brier_min_fde(predictions, ground_truth, probabilities):
+    fde = np.linalg.norm(predictions[:, -1] - ground_truth[:, -1], axis=-1)
+    min_fde = np.min(fde)
+    brier_score = (1.0 - probabilities) ** 2
+    return min_fde + brier_score.mean()
 
-class ClassificationLoss(nn.Module):
-    def __init__(self):
-        super(ClassificationLoss, self).__init__()
-        self.cross_entropy = nn.CrossEntropyLoss()
+def brier_min_ade(predictions, ground_truth, probabilities):
+    ade = np.linalg.norm(predictions - ground_truth, axis=-1).mean(axis=-1)
+    min_ade = np.min(ade)
+    brier_score = (1.0 - probabilities) ** 2
+    return min_ade + brier_score.mean()
 
-    def forward(self, pred, target):
-        return self.cross_entropy(pred, target)
-
-class TotalLoss(nn.Module):
-    def __init__(self, alpha1, alpha2, alpha3):
-        super(TotalLoss, self).__init__()
-        self.daa_loss = DAALoss()
-        self.conf_loss = ConfidenceLoss()
-        self.cls_loss = ClassificationLoss()
-        self.alpha1 = nn.Parameter(torch.tensor(alpha1, requires_grad=True))
-        self.alpha2 = nn.Parameter(torch.tensor(alpha2, requires_grad=True))
-        self.alpha3 = nn.Parameter(torch.tensor(alpha3, requires_grad=True))
-
-    def forward(self, pred, target, in_drivable_area, distance_error, pred_dist, target_dist, cls_pred, cls_target):
-        loss_daa = self.daa_loss(pred, target, in_drivable_area, distance_error)
-        loss_conf = self.conf_loss(pred_dist, target_dist)
-        loss_cls = self.cls_loss(cls_pred, cls_target)
-
-        total_loss = (1 / (2 * self.alpha1**2)) * loss_daa + \
-                     (1 / (2 * self.alpha2**2)) * loss_conf + \
-                     (1 / (2 * self.alpha3**2)) * loss_cls + \
-                     torch.log(1 + self.alpha1) + \
-                     torch.log(1 + self.alpha2) + \
-                     torch.log(1 + self.alpha3)
-
-        return total_loss.mean()
+def drivable_area_compliance(predictions, drivable_area_mask):
+    compliance = (predictions[:, :, None] == drivable_area_mask[None, None, :]).all(axis=-1).mean()
+    return compliance
 
 
