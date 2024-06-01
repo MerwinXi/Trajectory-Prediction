@@ -1,64 +1,58 @@
+import torch
 import torch.nn as nn
 
-class HistoryTrajectoryEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(HistoryTrajectoryEncoder, self).__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim)
+class TrackFormer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=6):
+        super(TrackFormer, self).__init__()
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
+            num_layers=num_layers
         )
-
-    def forward(self, history):
-        batch_size, N, Th, input_dim = history.size()
-        history = history.view(batch_size * N, Th, input_dim)
-        history_encoded = self.mlp(history)
-        history_encoded = history_encoded.view(batch_size, N, Th, -1)
-        return history_encoded
-
-class HDMapEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(HDMapEncoder, self).__init__()
-        self.fpn = nn.Sequential(
-            nn.Conv1d(input_dim, hidden_dim, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(hidden_dim, output_dim, kernel_size=1)
+        self.decoder = nn.TransformerDecoder(
+            nn.TransformerDecoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
+            num_layers=num_layers
         )
+        self.fc = nn.Linear(input_dim, output_dim)
+        self.attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=8)
 
-    def forward(self, hd_map):
-        batch_size, L, O, input_dim = hd_map.size()
-        hd_map = hd_map.view(batch_size * L, O, input_dim).permute(0, 2, 1)
-        hd_map_encoded = self.fpn(hd_map)
-        hd_map_encoded = hd_map_encoded.permute(0, 2, 1).view(batch_size, L, O, -1)
-        return hd_map_encoded
+    def forward(self, src, tgt):
+        memory = self.encoder(src)
+        attention_output, _ = self.attention(memory, memory, memory)
+        output = self.decoder(tgt, attention_output)
+        return self.fc(output)
 
-class PlanningTrajectoryEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(PlanningTrajectoryEncoder, self).__init__()
-        self.fpn = nn.Sequential(
-            nn.Conv1d(input_dim, hidden_dim, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(hidden_dim, output_dim, kernel_size=1)
+class PMFormer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=6):
+        super(PMFormer, self).__init__()
+        self.map_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
+            num_layers=num_layers
         )
+        self.planning_encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
+            num_layers=num_layers
+        )
+        self.cross_attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=8)
+        self.fc = nn.Linear(input_dim, output_dim)
 
-    def forward(self, planning_trajectory):
-        batch_size, N, U, T, input_dim = planning_trajectory.size()
-        planning_trajectory = planning_trajectory.view(batch_size * N * U, T, input_dim).permute(0, 2, 1)
-        planning_trajectory_encoded = self.fpn(planning_trajectory)
-        planning_trajectory_encoded = planning_trajectory_encoded.permute(0, 2, 1).view(batch_size, N, U, T, -1)
-        return planning_trajectory_encoded
+    def forward(self, map_features, planning_features):
+        map_memory = self.map_encoder(map_features)
+        planning_memory = self.planning_encoder(planning_features)
+        cross_attention_output, _ = self.cross_attention(planning_memory, map_memory, map_memory)
+        return self.fc(cross_attention_output)
 
-class MultiModalRepresentation(nn.Module):
-    def __init__(self, history_input_dim, history_hidden_dim, history_output_dim,
-                 map_input_dim, map_hidden_dim, map_output_dim,
-                 planning_input_dim, planning_hidden_dim, planning_output_dim):
-        super(MultiModalRepresentation, self).__init__()
-        self.history_encoder = HistoryTrajectoryEncoder(history_input_dim, history_hidden_dim, history_output_dim)
-        self.map_encoder = HDMapEncoder(map_input_dim, map_hidden_dim, map_output_dim)
-        self.planning_encoder = PlanningTrajectoryEncoder(planning_input_dim, planning_hidden_dim, planning_output_dim)
+class PETModel(nn.Module):
+    def __init__(self, track_input_dim, track_hidden_dim, track_output_dim,
+                 pm_input_dim, pm_hidden_dim, pm_output_dim):
+        super(PETModel, self).__init__()
+        self.trackformer = TrackFormer(track_input_dim, track_hidden_dim, track_output_dim)
+        self.pmformer = PMFormer(pm_input_dim, pm_hidden_dim, pm_output_dim)
+        self.prediction_header = nn.Linear(track_output_dim, pm_output_dim)
+        self.uncertainty_module = nn.Linear(pm_output_dim, 2)  # GMM的μ和σ
 
-    def forward(self, history, hd_map, planning_trajectory):
-        history_encoded = self.history_encoder(history)
-        hd_map_encoded = self.map_encoder(hd_map)
-        planning_trajectory_encoded = self.planning_encoder(planning_trajectory)
-        return history_encoded, hd_map_encoded, planning_trajectory_encoded
+    def forward(self, history, future, map_features, planning_features):
+        track_output = self.trackformer(history, future)
+        pm_output = self.pmformer(map_features, planning_features)
+        final_output = self.prediction_header(pm_output)
+        mu, sigma = self.uncertainty_module(final_output).chunk(2, dim=-1)
+        return final_output, mu, sigma
