@@ -37,22 +37,19 @@ class TotalLoss(nn.Module):
         self.alpha1 = nn.Parameter(torch.tensor(alpha1, requires_grad=True))
         self.alpha2 = nn.Parameter(torch.tensor(alpha2, requires_grad=True))
         self.alpha3 = nn.Parameter(torch.tensor(alpha3, requires_grad=True))
-        self.alpha_aux = nn.Parameter(torch.tensor(alpha_aux, requires_grad=True))  # 辅助损失权重
+        self.alpha_aux = nn.Parameter(torch.tensor(alpha_aux, requires_grad=True))
 
-    def forward(self, pred, target, in_drivable_area, distance_error, pred_dist, target_dist, cls_pred, cls_target, auxiliary_output, auxiliary_target):
+    def forward(self, pred, target, in_drivable_area, distance_error, pred_dist, target_dist, cls_pred, cls_target):
         loss_daa = self.daa_loss(pred, target, in_drivable_area, distance_error)
         loss_conf = self.conf_loss(pred_dist, target_dist)
         loss_cls = self.cls_loss(cls_pred, cls_target)
-        loss_aux = self.cls_loss(auxiliary_output, auxiliary_target)  # 辅助损失
 
         total_loss = (1 / (2 * self.alpha1**2)) * loss_daa + \
                      (1 / (2 * self.alpha2**2)) * loss_conf + \
                      (1 / (2 * self.alpha3**2)) * loss_cls + \
-                     (1 / (2 * self.alpha_aux**2)) * loss_aux + \
                      torch.log(1 + self.alpha1) + \
                      torch.log(1 + self.alpha2) + \
-                     torch.log(1 + self.alpha3) + \
-                     torch.log(1 + self.alpha_aux)
+                     torch.log(1 + self.alpha3)
 
         return total_loss.mean()
 
