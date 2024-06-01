@@ -1,36 +1,104 @@
+import torch
 import numpy as np
+from metrics import (
+    min_ade,
+    min_fde,
+    miss_rate,
+    brier_min_fde,
+    brier_min_ade,
+    drivable_area_compliance,
+)
 
-def min_ade(predictions, ground_truth):
-    ade = np.linalg.norm(predictions - ground_truth, axis=-1).mean(axis=-1)
-    min_ade = np.min(ade)
-    return min_ade
+class Trainer:
+    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, num_epochs=10):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.num_epochs = num_epochs
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
 
-def min_fde(predictions, ground_truth):
-    fde = np.linalg.norm(predictions[:, -1] - ground_truth[:, -1], axis=-1)
-    min_fde = np.min(fde)
-    return min_fde
+    def train_one_epoch(self):
+        self.model.train()
+        total_loss = 0
+        for data in self.train_loader:
+            history, future, map_features, planning_features, target = [d.to(self.device) for d in data]
+            self.optimizer.zero_grad()
+            output = self.model(history, map_features, planning_features)
+            loss = self.loss_fn(output, target)
+            loss.backward()
+            self.optimizer.step()
+            total_loss += loss.item()
+        avg_loss = total_loss / len(self.train_loader)
+        return avg_loss
 
-def miss_rate(predictions, ground_truth, threshold=2.0):
-    distances = np.linalg.norm(predictions - ground_truth, axis=-1)
-    min_distances = np.min(distances, axis=-1)
-    miss_rate = np.mean(min_distances > threshold)
-    return miss_rate
+    def validate(self):
+        self.model.eval()
+        total_loss = 0
+        metrics = {
+            "minADE": [],
+            "minFDE": [],
+            "MissRate": [],
+            "Brier-minFDE": [],
+            "Brier-minADE": [],
+            "DAC": []
+        }
+        with torch.no_grad():
+            for data in self.val_loader:
+                history, future, map_features, planning_features, target = [d.to(self.device) for d in data]
+                output = self.model(history, map_features, planning_features)
+                loss = self.loss_fn(output, target)
+                total_loss += loss.item()
 
-def brier_min_fde(predictions, ground_truth, probabilities):
-    fde = np.linalg.norm(predictions[:, -1] - ground_truth[:, -1], axis=-1)
-    min_fde = np.min(fde)
-    brier_score = (1.0 - probabilities) ** 2
-    return min_fde + brier_score.mean()
+                # 计算各类评估指标
+                predictions = output.cpu().numpy()
+                ground_truth = target.cpu().numpy()
+                probabilities = np.ones(predictions.shape[0])
 
-def brier_min_ade(predictions, ground_truth, probabilities):
-    ade = np.linalg.norm(predictions - ground_truth, axis=-1).mean(axis=-1)
-    min_ade = np.min(ade)
-    brier_score = (1.0 - probabilities) ** 2
-    return min_ade + brier_score.mean()
+                metrics["minADE"].append(min_ade(predictions, ground_truth))
+                metrics["minFDE"].append(min_fde(predictions, ground_truth))
+                metrics["MissRate"].append(miss_rate(predictions, ground_truth))
+                metrics["Brier-minFDE"].append(brier_min_fde(predictions, ground_truth, probabilities))
+                metrics["Brier-minADE"].append(brier_min_ade(predictions, ground_truth, probabilities))
+                metrics["DAC"].append(drivable_area_compliance(predictions, map_features.cpu().numpy()))
 
-def drivable_area_compliance(predictions, drivable_area_mask):
-    compliance = (predictions[:, :, None] == drivable_area_mask[None, None, :]).all(axis=-1).mean()
-    return compliance
+        avg_loss = total_loss / len(self.val_loader)
+        avg_metrics = {k: np.mean(v) for k, v in metrics.items()}
+        return avg_loss, avg_metrics
+
+    def save_checkpoint(self, epoch, filename="checkpoint.pth"):
+        state = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+        }
+        torch.save(state, filename)
+
+    def load_checkpoint(self, filename="checkpoint.pth"):
+        state = torch.load(filename)
+        self.model.load_state_dict(state['model_state_dict'])
+        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+        self.scheduler.load_state_dict(state['scheduler_state_dict'])
+        start_epoch = state['epoch'] + 1
+        return start_epoch
+
+    def train(self):
+        best_val_loss = float('inf')
+        for epoch in range(self.num_epochs):
+            train_loss = self.train_one_epoch()
+            val_loss, val_metrics = self.validate()
+            self.scheduler.step()
+
+            print(f"Epoch {epoch + 1}/{self.num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+            print(f"Validation Metrics: {val_metrics}")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                self.save_checkpoint(epoch)
+
 
 
 
