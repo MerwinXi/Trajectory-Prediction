@@ -1,68 +1,72 @@
 import torch
 import torch.nn as nn
 
-class HistoryTrajectoryEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(HistoryTrajectoryEncoder, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True, num_layers=2, dropout=0.3)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, history):
-        _, (hidden, _) = self.lstm(history)
-        history_encoded = self.fc(hidden[-1])
-        return history_encoded
-
-class HDMapEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(HDMapEncoder, self).__init__()
-        self.fpn = nn.Sequential(
-            nn.Conv1d(input_dim, hidden_dim, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv1d(hidden_dim, output_dim, kernel_size=1)
+class SelfAttentionEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers=6):
+        super(SelfAttentionEncoder, self).__init__()
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
+            num_layers=num_layers
         )
 
-    def forward(self, hd_map):
-        hd_map = hd_map.permute(0, 2, 1)
-        hd_map_encoded = self.fpn(hd_map)
-        hd_map_encoded = hd_map_encoded.permute(0, 2, 1)
-        return hd_map_encoded
+    def forward(self, x):
+        return self.encoder(x)
 
-class PlanningTrajectoryEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(PlanningTrajectoryEncoder, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True, num_layers=2, dropout=0.3)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, planning_trajectory):
-        _, (hidden, _) = self.lstm(planning_trajectory)
-        planning_trajectory_encoded = self.fc(hidden[-1])
-        return planning_trajectory_encoded
-
-class MultiModalRepresentation(nn.Module):
-    def __init__(self, history_input_dim, history_hidden_dim, history_output_dim,
-                 map_input_dim, map_hidden_dim, map_output_dim,
-                 planning_input_dim, planning_hidden_dim, planning_output_dim):
-        super(MultiModalRepresentation, self).__init__()
-        self.history_encoder = HistoryTrajectoryEncoder(history_input_dim, history_hidden_dim, history_output_dim)
-        self.map_encoder = HDMapEncoder(map_input_dim, map_hidden_dim, map_output_dim)
-        self.planning_encoder = PlanningTrajectoryEncoder(planning_input_dim, planning_hidden_dim, planning_output_dim)
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(history_output_dim + map_output_dim + planning_output_dim, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3)
+class CrossAttentionEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers=6):
+        super(CrossAttentionEncoder, self).__init__()
+        self.encoder = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
+            num_layers=num_layers
         )
+        self.cross_attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=8)
 
-    def forward(self, history, hd_map, planning_trajectory):
-        history_encoded = self.history_encoder(history)
-        hd_map_encoded = self.map_encoder(hd_map)
-        planning_trajectory_encoded = self.planning_encoder(planning_trajectory)
-        
-        combined_features = torch.cat((history_encoded, hd_map_encoded, planning_trajectory_encoded), dim=-1)
-        fused_features = self.fusion_layer(combined_features)
-        return fused_features
+    def forward(self, src, tgt):
+        memory = self.encoder(src)
+        cross_attention_output, _ = self.cross_attention(tgt, memory, memory)
+        return cross_attention_output
+
+class TrackFormer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(TrackFormer, self).__init__()
+        self.self_attention1 = SelfAttentionEncoder(input_dim, hidden_dim)
+        self.self_attention2 = SelfAttentionEncoder(input_dim, hidden_dim)
+        self.cross_attention = CrossAttentionEncoder(input_dim, hidden_dim)
+        self.fc = nn.Linear(input_dim, output_dim)
+
+    def forward(self, track_embedding):
+        x = self.self_attention1(track_embedding)
+        x = self.self_attention2(x)
+        x = self.cross_attention(x, x)
+        return self.fc(x)
+
+class PMFormer(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(PMFormer, self).__init__()
+        self.self_attention_planning = SelfAttentionEncoder(input_dim, hidden_dim)
+        self.self_attention_map = SelfAttentionEncoder(input_dim, hidden_dim)
+        self.cross_attention = CrossAttentionEncoder(input_dim, hidden_dim)
+        self.fc = nn.Linear(input_dim, output_dim)
+
+    def forward(self, planning_embedding, map_embedding):
+        planning = self.self_attention_planning(planning_embedding)
+        map_ = self.self_attention_map(map_embedding)
+        cross_attention_output = self.cross_attention(map_, planning)
+        return self.fc(cross_attention_output)
+
+class PETModel(nn.Module):
+    def __init__(self, track_input_dim, track_hidden_dim, track_output_dim,
+                 pm_input_dim, pm_hidden_dim, pm_output_dim):
+        super(PETModel, self).__init__()
+        self.trackformer = TrackFormer(track_input_dim, track_hidden_dim, track_output_dim)
+        self.pmformer = PMFormer(pm_input_dim, pm_hidden_dim, pm_output_dim)
+        self.prediction_header = nn.Linear(pm_output_dim, 2)  # For final prediction (x, y) coordinates
+
+    def forward(self, track_embedding, map_embedding, planning_embedding):
+        track_output = self.trackformer(track_embedding)
+        pm_output = self.pmformer(planning_embedding, map_embedding)
+        final_output = self.prediction_header(pm_output)
+        return final_output
 
 
 
