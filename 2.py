@@ -1,72 +1,85 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-class SelfAttentionEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=6):
-        super(SelfAttentionEncoder, self).__init__()
-        self.encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
-            num_layers=num_layers
+class HistoryTrajectoryEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        lstm_out, (hidden, _) = self.lstm(x)
+        hidden = hidden[-1]  # Taking the last layer's hidden state
+        return self.fc(hidden)
+
+class PlanningTrajectoryEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
         )
 
     def forward(self, x):
-        return self.encoder(x)
+        return self.fc(x)
 
-class CrossAttentionEncoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers=6):
-        super(CrossAttentionEncoder, self).__init__()
-        self.encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d_model=input_dim, nhead=8, dim_feedforward=hidden_dim),
-            num_layers=num_layers
+class HDMapEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dim)
         )
-        self.cross_attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=8)
 
-    def forward(self, src, tgt):
-        memory = self.encoder(src)
-        cross_attention_output, _ = self.cross_attention(tgt, memory, memory)
-        return cross_attention_output
+    def forward(self, x):
+        return self.fc(x)
 
+# TrackFormer: Uses LSTM to process tracking data
 class TrackFormer(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(TrackFormer, self).__init__()
-        self.self_attention1 = SelfAttentionEncoder(input_dim, hidden_dim)
-        self.self_attention2 = SelfAttentionEncoder(input_dim, hidden_dim)
-        self.cross_attention = CrossAttentionEncoder(input_dim, hidden_dim)
-        self.fc = nn.Linear(input_dim, output_dim)
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, track_embedding):
-        x = self.self_attention1(track_embedding)
-        x = self.self_attention2(x)
-        x = self.cross_attention(x, x)
-        return self.fc(x)
+    def forward(self, x):
+        _, (hidden, _) = self.lstm(x)
+        return self.fc(hidden[-1])
 
+# PMFormer: Processes planning and map data with cross-attention
 class PMFormer(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, plan_dim, map_dim, output_dim):
         super(PMFormer, self).__init__()
-        self.self_attention_planning = SelfAttentionEncoder(input_dim, hidden_dim)
-        self.self_attention_map = SelfAttentionEncoder(input_dim, hidden_dim)
-        self.cross_attention = CrossAttentionEncoder(input_dim, hidden_dim)
-        self.fc = nn.Linear(input_dim, output_dim)
+        self.planning_encoder = nn.Linear(plan_dim, output_dim)
+        self.map_encoder = nn.Linear(map_dim, output_dim)
+        self.cross_attention = nn.MultiheadAttention(embed_dim=output_dim, num_heads=8)
+        self.decoder = nn.Linear(output_dim, output_dim)
 
-    def forward(self, planning_embedding, map_embedding):
-        planning = self.self_attention_planning(planning_embedding)
-        map_ = self.self_attention_map(map_embedding)
-        cross_attention_output = self.cross_attention(map_, planning)
-        return self.fc(cross_attention_output)
+    def forward(self, plan_data, map_data):
+        plan_encoded = self.planning_encoder(plan_data).unsqueeze(0)
+        map_encoded = self.map_encoder(map_data).unsqueeze(0)
+        attn_output, _ = self.cross_attention(plan_encoded, map_encoded, map_encoded)
+        output = self.decoder(attn_output.squeeze(0))
+        return output
 
-class PETModel(nn.Module):
-    def __init__(self, track_input_dim, track_hidden_dim, track_output_dim,
-                 pm_input_dim, pm_hidden_dim, pm_output_dim):
-        super(PETModel, self).__init__()
-        self.trackformer = TrackFormer(track_input_dim, track_hidden_dim, track_output_dim)
-        self.pmformer = PMFormer(pm_input_dim, pm_hidden_dim, pm_output_dim)
-        self.prediction_header = nn.Linear(pm_output_dim, 2)  # For final prediction (x, y) coordinates
+# PET: Integrates outputs from TrackFormer and PMFormer
+class PET(nn.Module):
+    def __init__(self, history_dim, planning_dim, map_dim, hidden_dim, output_dim):
+        super(PET, self).__init__()
+        self.history_encoder = nn.Linear(history_dim, output_dim)
+        self.pmformer = PMFormer(planning_dim, map_dim, output_dim)
+        self.trackformer = TrackFormer(output_dim, hidden_dim, output_dim)
+        self.prediction_header = nn.Linear(output_dim * 2, 2)
 
-    def forward(self, track_embedding, map_embedding, planning_embedding):
-        track_output = self.trackformer(track_embedding)
-        pm_output = self.pmformer(planning_embedding, map_embedding)
-        final_output = self.prediction_header(pm_output)
-        return final_output
+    def forward(self, history_data, planning_data, map_data):
+        history_emb = self.history_encoder(history_data)
+        pm_output = self.pmformer(planning_data, map_data)
+        track_output = self.trackformer(history_emb.unsqueeze(1))
+        combined_output = torch.cat((pm_output, track_output), dim=1)
+        prediction = self.prediction_header(combined_output)
+        return prediction
 
 
 
