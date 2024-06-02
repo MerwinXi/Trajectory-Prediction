@@ -10,12 +10,13 @@ from metrics import (
 )
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, num_epochs=10):
+    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, loss_fn, num_epochs=10):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.loss_fn = loss_fn
         self.num_epochs = num_epochs
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
@@ -30,7 +31,8 @@ class Trainer:
             loss = self.loss_fn(output, target)
             loss.backward()
             self.optimizer.step()
-            total_loss += loss.item()
+            total_s = loss.item()
+            total_loss += total_s
         avg_loss = total_loss / len(self.train_loader)
         return avg_loss
 
@@ -52,10 +54,10 @@ class Trainer:
                 loss = self.loss_fn(output, target)
                 total_loss += loss.item()
 
-                # 计算各类评估指标
+                # Evaluate metrics
                 predictions = output.cpu().numpy()
                 ground_truth = target.cpu().numpy()
-                probabilities = np.ones(predictions.shape[0])
+                probabilities = np.ones(predictions.shape[0])  # Assuming uniform probabilities for simplicity
 
                 metrics["minADE"].append(min_ade(predictions, ground_truth))
                 metrics["minFDE"].append(min_fde(predictions, ground_truth))
@@ -68,12 +70,13 @@ class Trainer:
         avg_metrics = {k: np.mean(v) for k, v in metrics.items()}
         return avg_loss, avg_metrics
 
-    def save_checkpoint(self, epoch, filename="checkpoint.pth"):
+    def save_checkpoint(self, epoch, best_val_loss, filename="checkpoint.pth"):
         state = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_val_loss': best_val_loss
         }
         torch.save(state, filename)
 
@@ -82,8 +85,7 @@ class Trainer:
         self.model.load_state_dict(state['model_state_dict'])
         self.optimizer.load_state_dict(state['optimizer_state_dict'])
         self.scheduler.load_state_dict(state['scheduler_state_dict'])
-        start_epoch = state['epoch'] + 1
-        return start_epoch
+        return state['epoch'], state.get('best_val_loss', float('inf'))
 
     def train(self):
         best_val_loss = float('inf')
@@ -97,7 +99,10 @@ class Trainer:
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                self.save_checkpoint(epoch)
+                self.save_checkpoint(epoch, best_val_loss)
+
+
+
 
 
 
