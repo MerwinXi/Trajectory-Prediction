@@ -1,48 +1,54 @@
 import torch
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from datasets import ArgoverseDataset
-from encoders import MultiModalRepresentation
-from formers import PreFusionDModel, PETModel
-from losses import TotalLoss
-from trainer import Trainer
+import torch.nn as nn
+import torch.nn.functional as F
 
-def main():
-    # 配置参数
-    data_root = '/path/to/argoverse/data'
-    train_split = 'train'
-    val_split = 'val'
-    cfg = {
-        'some_config_key': 'some_config_value'
-    }
+class CustomLossModule(nn.Module):
+    def __init__(self):
+        super(CustomLossModule, self).__init__()
+        # 可学习的权重参数
+        self.alpha1 = nn.Parameter(torch.tensor(1.0))
+        self.alpha2 = nn.Parameter(torch.tensor(1.0))
+        self.alpha3 = nn.Parameter(torch.tensor(1.0))
 
-    # 初始化数据集
-    train_dataset = ArgoverseDataset(data_root, train_split, processes=[], cfg=cfg)
-    val_dataset = ArgoverseDataset(data_root, val_split, processes=[], cfg=cfg)
+    def huber_loss(self, pred, truth, delta=1.0):
+        """标准的Huber损失，用于平滑回归损失计算。"""
+        abs_diff = torch.abs(pred - truth)
+        quadratic = torch.where(abs_diff <= delta, 0.5 * abs_diff ** 2, delta * (abs_diff - 0.5 * delta))
+        return quadratic.mean()
 
-    # 数据加载器
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    def daa_regression_loss(self, pred, truth, drivable_mask, delta=1.0):
+        """可行驶区域感知的回归损失，增加额外的惩罚项。"""
+        base_loss = self.huber_loss(pred, truth, delta)
+        # 计算预测点与真实点的欧式距离
+        DE = torch.sqrt(torch.sum((pred - truth) ** 2, dim=1))
+        # 应用条件惩罚
+        penalty = torch.log(1 + DE) * drivable_mask
+        return (base_loss + penalty).mean()
 
-    # 初始化模型
-    # PreFusion-D模型
-    prefusion_model = PreFusionDModel(track_input_dim=128, track_hidden_dim=256, track_output_dim=128,
-                                      map_input_dim=128, map_hidden_dim=256, map_output_dim=128,
-                                      planning_input_dim=128, planning_hidden_dim=256, planning_output_dim=128)
-    
-    # PET模型
-    pet_model = PETModel(track_input_dim=128, track_hidden_dim=256, track_output_dim=128,
-                         pm_input_dim=128, pm_hidden_dim=256, pm_output_dim=128)
+    def confidence_loss(self, pred, truth):
+        """使用KL散度计算预测和真实分布之间的置信度损失。"""
+        pred_log_softmax = F.log_softmax(pred, dim=1)
+        truth_softmax = F.softmax(truth, dim=1)
+        return F.kl_div(pred_log_softmax, truth_softmax, reduction='batchmean')
 
-    # 优化器和调度器
-    optimizer = optim.AdamW(pet_model.parameters(), lr=0.001, weight_decay=0.0001)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    def classification_loss(self, pred, labels):
+        """分类任务的交叉熵损失。"""
+        return F.cross_entropy(pred, labels)
 
-    # 初始化Trainer
-    trainer = Trainer(pet_model, train_loader, val_loader, optimizer, scheduler, num_epochs=10)
+    def forward(self, pred, truth, drivable_mask, labels):
+        """计算总损失，结合三个损失及其权重。"""
+        l_daa_reg = self.daa_regression_loss(pred, truth, drivable_mask)
+        l_conf = self.confidence_loss(pred, truth)
+        l_cls = self.classification_loss(pred, labels)
 
-    # 训练
-    trainer.train()
+        # 每个权重参数的对数正则项
+        regularization = torch.log(self.alpha1 + 1) + torch.log(self.alpha2 + 1) + torch.log(self.alpha3 + 1)
 
-if __name__ == '__main__':
-    main()
+        # 加权求和的总损失
+        l_sum = (1 / self.alpha1 ** 2) * l_daa_reg + \
+                (1 / self.alpha2 ** 2) * l_conf + \
+                (1 / self.alpha3 ** 2) * l_cls + \
+                regularization
+
+        return l_sum
+
