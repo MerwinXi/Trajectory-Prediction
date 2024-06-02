@@ -1,7 +1,7 @@
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from datasets import ArgoverseDataset  
+from datasets import TrajectoryDataset
 from models import PETModel           
 from trainer import Trainer            
 
@@ -11,8 +11,8 @@ def main():
     input_dim = 128   
 
    
-    train_dataset = ArgoverseDataset(data_size=data_size, input_dim=input_dim)
-    val_dataset = ArgoverseDataset(data_size=data_size, input_dim=input_dim)
+    train_dataset = TrajectoryDataset(data_size=data_size, input_dim=input_dim)
+    val_dataset = TrajectoryDataset(data_size=data_size, input_dim=input_dim)
 
   
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
